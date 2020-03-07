@@ -20,8 +20,8 @@ char datetime[24];
 
 GPRS gprsTest(PIN_TX,PIN_RX,BAUDRATE);
 
-char* privateTelephoneNumber[]={"+33781223900","+33682784555","END"};
-//char* privateTelephoneNumber[]={"+33781223909","+33682784555","END"};
+char* privateTelephoneNumber[]={"+337********","+336******","END"};
+//char* privateTelephoneNumber[]={"+3378*******","+3368******","END"};
 
 char* SMScommand[]={"temperature", "arret", "hors-gel", "confort","?","END"};
 //penser à les recopier ds le switch
