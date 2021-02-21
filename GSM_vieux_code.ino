@@ -1,234 +1,473 @@
-#include <GPRS_Shield_Arduino.h>
 #include <SoftwareSerial.h>
-#include <Wire.h>
+#include <dht.h>
 
-#define PIN_TX    2
-#define PIN_RX    3
-#define BAUDRATE  9600
+#define SERIALPCBAUDRATE 19200
+#define SERIALGSMBAUDRATE 19200
+#define POWERKEY 9
 
-#include <dht11.h> 
-dht11 DHT11; 
-#define DHT11PIN 4 
+#define PINRELAI1 5
+#define PINRELAI2 6
 
+#define MAXBAUDRATEMSG 128
 
-#define MESSAGE_LENGTH 160
-char message[MESSAGE_LENGTH];
-int messageIndex = 0;
+#define DHT11_PIN 2
+dht DHT;
 
-char phone[16];
-char datetime[24];
+HardwareSerial &gsm = Serial1;
 
-GPRS gprsTest(PIN_TX,PIN_RX,BAUDRATE);
+//0=ARRET, 1=HORS-GEL, 2=CONFORT
+int arduinoState = 0;
 
-char* privateTelephoneNumber[]={"+337********","+336******","END"};
-//char* privateTelephoneNumber[]={"+3378*******","+3368******","END"};
+const boolean DEBUG = true;
 
-char* SMScommand[]={"temperature", "arret", "hors-gel", "confort","?","END"};
-//penser à les recopier ds le switch
+const int COMMANDESIZE = 7;
+const char COMMANDE[][9] = {"TEMP","ARRET", "HORS-GEL", "CONFORT","??","STATUS","REBOOT"};
 
-String mdp="mdp";
-int tailleMdp=3;
+const int NUMBERSIZE = 3;      //FIRST NUMBER IS RECEIVING SMS AT EVERY START
+const char KNOWNNUMBER[][13] = {"+***********","+***********","+***********"};
+//12
 
-const int relai_1=6,relai_2=7;
-const int led=13;
+const char OKRETURN[3] = "OK";
 
-void setup() {  
-  Serial.begin(9600);
-  
-  pinMode(relai_1,OUTPUT);
-  pinMode(relai_2,OUTPUT);
-  pinMode(led,OUTPUT);
-  while(!gprsTest.init()) {
-      Serial.print("initialisation error\r\n");
-      digitalWrite(led,HIGH);
-      delay(200);
-      digitalWrite(led,LOW);
-      delay(200);
-      digitalWrite(led,HIGH);
-      delay(200);
-      digitalWrite(led,LOW);
-      delay(200);
-      digitalWrite(led,HIGH);
-      delay(200);
-  }
-  delay(3000);  
-  Serial.println("initialisation OK");
-  digitalWrite(led,HIGH);
+int len(char inText[]){
+  int length = 0;
+
+  while (inText[length] != 0)
+    length++;
+
+  return length;
 }
 
-void loop() {
-   messageIndex = gprsTest.isSMSunread();
-   if (messageIndex > 0) {
-      gprsTest.readSMS(messageIndex, message, MESSAGE_LENGTH, phone, datetime);           
-      gprsTest.deleteSMS(messageIndex);
-      
-      Serial.println("nouveau message... Check en cours...");      
+/* ### SEND COMMAND TO GSM + READ RESPONSE ### */
+void sendCMD(char commandeReturnString[], char cmd[], const int timeForReading, const int maxSizeString){
+  if(cmd=="ctrlz")
+    gsm.println((char)26);
+  else
+    gsm.println(cmd);
 
-      int returnCPNE=checkPhoneNumberExist(phone,message);
-      if(returnCPNE!=0) {
-        String messageS=message;
-        if(returnCPNE==2){
-          messageS=messageS.substring(tailleMdp);
-        }
-                
-        Serial.print("numero entrant : ");
-        Serial.println(phone); 
+  //START READING RESOPONSE
+  if(DEBUG)
+    Serial.println("START READ SERIAL");
 
-        if(checkOrExecCommand(messageS,phone,1)==false){
-          Serial.print("command undefined : ");
-          Serial.println(messageS);
-          gprsTest.sendSMS(phone,"commande indefini");
-          Serial.print("erreur envoye à : ");
-          Serial.println(phone);
-        }
-        else{
-          Serial.print("commande : ");
-          Serial.println(messageS);
+  long int timeBefore=millis();
 
-          if(checkOrExecCommand(messageS,phone,2)){
-            gprsTest.sendSMS(phone,"mode execute sans erreur");
-          }
-          
-          Serial.print("message recu : ");
-          Serial.println(messageS);   
-        }
-        
-        /*Serial.print("Datetime: ");
-        Serial.println(datetime);  */
-      }
-   }
+  int counterCommande=0;
+
+  while( (timeBefore+timeForReading) > millis()){
+    while (gsm.available() && counterCommande<maxSizeString){
+      //TODO : ATTENTION QUE COMPTEUR DEPASSE PAS TAILLE DU TABLEAU
+      counterCommande++;
+      char c = gsm.read();
+      if(commandeReturnString!=0)
+        commandeReturnString[counterCommande]=c;
+    }
+  }
+  for(int a=counterCommande; a<maxSizeString; a++)
+    commandeReturnString[counterCommande]=NULL;
+
+ /* if(DEBUG)
+    Serial.println("commande return : "+commandeReturnString);*/
 }
 
-//0 telephone et mdp incorrect
-//1 reussite
-//2 mdp reussit
+int indexOf(char str[], const char toFind[]){
+  delay(50);
 
-int checkPhoneNumberExist(String nb, String msg){
-  int z=0;
-  bool PTNNotfinish=true;
-  
-  while(PTNNotfinish){
-    if(privateTelephoneNumber[z]=="END"){
-      Serial.println("max tableau OK 1 ");
-      PTNNotfinish=false;
+  int lengthSTRtofind=strlen(toFind);
+
+  for(int a=0; a<strlen(str)-lengthSTRtofind; a++){
+    boolean find=true;
+    int b;
+    for(b=0; b<lengthSTRtofind; b++)
+      if(str[a+b]!=toFind[b])
+        find=false;
+    if(find==true)
+      return a;
+  }
+  return -1;
+}
+
+/* ### FIND STRING IN STRING => boolean ### */
+boolean findStr(char str[], char const toFind[]){
+  //toFind max length = 20;
+
+  int posToFind=indexOf(str,toFind);
+  if(posToFind>=0)
+    return true;
+  else
+    return false;
+}
+
+/* ### SHUTDOWN GSM => EXPECT THAN GSM IS POWER ON ### */
+boolean shutdown(){
+  char commande[8]="AT+CPOF";
+
+  char returnCMD[MAXBAUDRATEMSG];
+  sendCMD(returnCMD,commande,2000, MAXBAUDRATEMSG);
+
+  boolean isShutdown=findStr(returnCMD,OKRETURN);
+
+  delay(10000);  //ERREUR PARFOIS DURANT LECTURE RETOUR DU SHUTDOWN DONC TJR FAIRE UN TEMPS D ATTENTE
+
+  if(isShutdown)
+    manage(0, 72, "shutdown => OK","");
+  else
+    manage(0, 85, "error while shutdown, expected is already shutdown","");
+}
+
+/* ### RESTART GSM ###*/
+void restart(){
+  delay(1000);
+  do{
+    shutdown();
+    digitalWrite(POWERKEY, LOW);
+    delay(1000);               // wait for 1 second
+    digitalWrite(POWERKEY, HIGH);
+    delay(15000);
+  } while(!checkIfSerialRespond());
+  delay(1000);
+}
+
+/* ### TRY TO COMMUNICATE WITH GSM ###*/
+boolean checkIfSerialRespond(){
+  char commande[3]="AT";
+
+  char returnCMD[MAXBAUDRATEMSG];
+  sendCMD(returnCMD,commande,2000,MAXBAUDRATEMSG);
+
+  return findStr(returnCMD,"OK");
+}
+
+/* ### MANAGE ERROR ### */
+void manage(int action, int lineNumber, char msg[], char tel[]){
+  if(DEBUG){
+    Serial.print(lineNumber);
+    Serial.print(", ");
+    Serial.println(msg);
+  }
+  if(action>0){
+    switch(action){
+      case 1:
+        Serial.println("RESTART GSM");
+        restart();
+      break;
+      case 2:
+        Serial.print("SEND SMS TO : ");
+        Serial.print(tel);
+        Serial.print(", MSG : ");
+        Serial.println(msg);
+        sendSms(tel,msg);
+      break;
+      case 3:
+        Serial.print("SEND SMS TO : ");
+        Serial.print(tel);
+        Serial.print(", MSG : ");
+        Serial.print(msg);
+        Serial.println("+ DELETE SMS & RESTART");
+        sendSms(tel,msg);
+        deleteAllSms();
+        restart();
+      break;
+      case 4:
+        Serial.println("DELETE SMS + restart");
+        deleteAllSms();
+        restart();
+      break;
+      case 5:
+        sendSms(tel,msg);
+        deleteAllSms();
+      break;
+      default:
+        Serial.println("UNDEFINED ERROR NUMBER");
+      break;
     }
-    else
-      z++;
-  }
-        
-  for(int b=0;b<z;b++){
-    if(nb==privateTelephoneNumber[b])
-      return 1;
-  }
-  if(msg.substring(0,tailleMdp)==mdp){
-    Serial.println("mdp OK");
-    return 2;
-  }
-  else{
-    Serial.print("numero inexistant et mdp incorrect, mdp testé : ");
-    Serial.println(msg.substring(0,50));
-
-    return 0;
   }
 }
-//mode 1 =check command, mode 2 = exec command
-bool checkOrExecCommand(String msg,String telNB,int mode){
-  int z=0;
-  bool SMScommandNotFinish=true;
-  
-  while(SMScommandNotFinish){
-    if(SMScommand[z]=="END"){
-      Serial.println("max tableau OK 2 ");
-      SMScommandNotFinish=false;
-    }
-    else
-      z++;
+//https://www.circuitbasics.com/wp-content/uploads/2015/10/DHTLib.zip
+/* ### CONVERT STRING TO ASCII DECIMAL (SMS ARE IN ASCII DECIMAL SO YOU NEED TO CONVERT YOUR COMMAND BEFORE COMPARING ###*/
+/*char *convertStrToAsciiDec(char str){  // ONLY FOR UNICODE
+  char returnStr[len(str)*3];
+  //TODO CHECK IF LENGTH IS CORRSPONDING !!!
+  for(int a=0; a<len(str); a++){
+    returnStr+="00"+String(str[a],HEX);
   }
-        
-  for(int b=0;b<z;b++){
-    if(msg==SMScommand[b]){
-      if(mode==1)
-        return true;
-        
-      else if(mode==2){
-                  
-        if(msg== "temperature"){
+  returnStr.toUpperCase();
+  return returnStr;
+}*/
 
+void *getTempHum(int &chk, int &hum, int &tem){
+  chk = DHT.read11(DHT11_PIN);
+  hum=(int)DHT.humidity;
+  tem=(int)DHT.temperature;
+}
 
-          int chk = DHT11.read(DHT11PIN); // Lecture du capteur
-        
-          Serial.print("Etat du capteur: ");
-        
-          switch (chk){
-            case DHTLIB_OK: 
-                        
-            break;
-            case DHTLIB_ERROR_CHECKSUM: 
-                        return false;
-            break;
-            case DHTLIB_ERROR_TIMEOUT: 
-                        return false;
-            break;
-            default: 
-                        return false;
-            break;
-          }
+/* ### EXECUTE COMMAND ### */
+void executeCommand(char SMSreturn[], int commandeNB, int maxLength){
+  //const String COMMANDE[COMMANDESIZE] = {"TEMP","ARRET", "HORS-GEL", "CONFORT","??","STATUS","REBOOT"};
 
-          char stringInChar[50]; 
-        
-          float humi=DHT11.humidity;
-          float temp=DHT11.temperature;
+  switch(commandeNB){
+    case 0:
+      Serial.println("code 0");
 
-          String tempS=ConvertionFloatToString(temp);
-          String humiS=ConvertionFloatToString(humi);
+      int ack,hum,temp;
+      getTempHum(ack, hum, temp);
 
-          String temperature="temperature : "+tempS+"C, humidite : "+humiS+"/100";
+      snprintf(SMSreturn, maxLength,"ACK : %d, HUM : %d, TEMP : %d",ack,hum,temp);
 
-          for(int compteur=0;compteur<temperature.length();compteur++){
-            stringInChar[compteur]=temperature[compteur];
-          }
-           
-          Serial.println(stringInChar);
-          gprsTest.sendSMS(phone,stringInChar);
-          return true;
-        }
-        
-        else if(msg=="arret"){
-          digitalWrite(relai_1,LOW);
-          digitalWrite(relai_2,LOW);
-          gprsTest.sendSMS(phone,"mode arret active");
-          return true;
-        }
-        else if(msg=="hors-gel"){
-          digitalWrite(relai_1,HIGH);
-          digitalWrite(relai_2,HIGH);
-          gprsTest.sendSMS(phone,"mode hors gel active");
-          return true;
-        }
-        else if(msg=="confort"){
-          digitalWrite(relai_1,HIGH);
-          digitalWrite(relai_2,LOW);
-          gprsTest.sendSMS(phone,"mode confort active");
-          return true;
-        }
-        else if(msg=="?"){
-          gprsTest.sendSMS(phone,"commande possible : temperature,arret,hors-gel,confort,?");
-          return true;
-        }
-        else
-          return false;
-      }
-    }
+    break;
+    case 1:
+      Serial.println("code 1");
+      digitalWrite(PINRELAI1,LOW);
+      digitalWrite(PINRELAI2,LOW);
+
+      arduinoState=0;
+
+      snprintf(SMSreturn, maxLength,"MODE ARRET ACTIF");
+    break;
+    case 2:
+      Serial.println("code 2");
+      digitalWrite(PINRELAI1,HIGH);
+      digitalWrite(PINRELAI2,HIGH);
+
+      arduinoState=1;
+
+      snprintf(SMSreturn, maxLength,"MODE HORS-GEL ACTIF");
+    break;
+    case 3:
+      Serial.println("code 3");
+      digitalWrite(PINRELAI1,HIGH);
+      digitalWrite(PINRELAI2,LOW);
+
+      arduinoState=2;
+
+      snprintf(SMSreturn, maxLength,"MODE CONFORT ACTIF");
+    break;
+    case 4:
+      Serial.println("code 4");
+    /*  SMSreturn="COMMANDE : ";
+      for(int commandeNb=0; commandeNb<COMMANDESIZE; commandeNb++){
+        SMSreturn+=COMMANDE[commandeNb];
+        if(commandeNb<COMMANDESIZE-1)
+          SMSreturn+=", ";
+      }*/
+
+      //TODO CHANGE THAT TO BE DONE AUTOMATICALLY, PARCOURIR TABLEAU ET CONCATENER CHAINE DE CARACTERE
+      snprintf(SMSreturn, maxLength,"TEMP,ARRET,HORS-GEL,CONFORT,??,STATUS,REBOOT");
+    break;
+    case 5:
+      Serial.println("code 5");
+      snprintf(SMSreturn, maxLength,"STATUS : %d",arduinoState);
+    break;
+    case 6:
+      Serial.println("code 6");
+      restart();
+      snprintf(SMSreturn, maxLength,"GSM IS REBOOTED");
+    break;
+    default:
+      snprintf(SMSreturn, maxLength,"COMMANDE NOT FOUND");
+    break;
+  }
+}
+
+/* ### CHECK IF PHONE NUMBER IS DECLARED ### */
+boolean checkPhoneNumber(char undefinedNb[12]){
+  //TODO CHECK IF SEND CHAR NUMBER IS GOOD 12 LENGTH
+  //TODO : CHECK THAN PHONE NUMBER IS 12 CHAR (OR 13 FOR LAST DEFAULT VALUE \o)
+
+  for(int phoneNB=0; phoneNB<NUMBERSIZE; phoneNB++){
+    boolean returnState=true;
+
+    for(int nb=0; nb<12; nb++)
+      if(KNOWNNUMBER[phoneNB][nb] != undefinedNb[nb])
+        returnState=false;
+
+    if(returnState)
+      return true;
   }
   return false;
 }
 
-String ConvertionFloatToString(float Val){
- char buffer[4];
- String str = dtostrf(Val, 2, 2, buffer);
- return str;
+void subChar(char returnSTR[], char str[], int start, int charLength){
+  //TODO VEFIFIER QUE START + LEN < TAILLE STR
+  int c=0;
+  for(int a=start; a<start+charLength; a++){
+    returnSTR[c]=str[a];  // C more lisible than a-start
+    c++;
+  }
 }
 
-//
-//supprimer msg carte sim !!!
+/* ### READ SMS ###*/
+void readSms(){
+  Serial.println("CHECK STEP 1");
 
+  char smsSTR[MAXBAUDRATEMSG];
+  sendCMD(smsSTR,"AT+CMGL=\"ALL\"",3000,MAXBAUDRATEMSG);
+
+  Serial.println("CHECK STEP 1.5");
+
+  if(findStr(smsSTR,"CMGL")){
+    int telPos=indexOf(smsSTR,"+33");
+    Serial.println("CHECK STEP 2, MSG : ");
+
+    Serial.println("SMS STR : ");
+    Serial.println(smsSTR);
+
+    if(telPos>-1 && strlen(smsSTR)>(telPos+12) ){
+      char telephone[12];
+      subChar(telephone,smsSTR,telPos,12);
+
+      boolean isDefined=checkPhoneNumber(telephone);
+      if(isDefined){
+
+        Serial.println("CHECK STEP 3");
+
+        boolean commandeFind=false;
+
+        for(int commandeNb=0; commandeNb<COMMANDESIZE; commandeNb++){
+
+        //  String commandCourante=convertStrToAsciiDec(COMMANDE[commandeNb]);   //ONLY FOR UNICODE
+
+      //    if(findStr(smsSTR,commandCourante) || findStr(smsSTR,COMMANDE[commandeNb])){      //ONLY FOR UNICODE
+          if(findStr(smsSTR,COMMANDE[commandeNb])){
+            Serial.println("CHECK STEP 4");
+
+            commandeFind=true;
+
+            char smsSTRtoSEND[MAXBAUDRATEMSG];
+            executeCommand(smsSTRtoSEND,commandeNb,MAXBAUDRATEMSG);
+
+            Serial.println("CHECK STEP 5");
+
+            Serial.println(smsSTRtoSEND);
+
+            manage(5,247,smsSTRtoSEND,telephone);
+          }
+        }
+        if(commandeFind==false)
+          manage(3,170,"UNDEFINED COMMAND => REBOOT GSM",telephone);
+      }
+      else
+        manage(4,179,"UNDEFINED NUMBER => REBOOT GSM","");
+
+    }
+    else{
+      Serial.println(telPos);
+      Serial.println(strlen(smsSTR));
+      manage(4,180,"UNDEFINED COMMAND RETURN DURING READING","");
+
+    }
+  }
+  //else{
+    //AUCUN SMS TROUVE
+  //}
+}
+
+/* ### DELETE ALL SMS ### */
+boolean deleteAllSms(){
+  char deleteSTR1[MAXBAUDRATEMSG];
+  sendCMD(deleteSTR1,"AT+CMGD=0,4",3000,MAXBAUDRATEMSG);
+
+  delay(2000);
+
+  char deleteSTR2[MAXBAUDRATEMSG];
+  sendCMD(deleteSTR2,"AT+CMGD=1,4",3000,MAXBAUDRATEMSG);
+
+  if(findStr(deleteSTR1,OKRETURN)!= true || findStr(deleteSTR2,OKRETURN)!= true)
+    manage(1,205,"ERROR DURING DELETEING SMS","");
+}
+
+void resetString(char str[]){
+  for(int a=0; a<sizeof(str); a++)
+    str[a]=NULL;
+}
+
+void appendStr(char str1[], char str2[], int a0, int b0, int bmax){
+  for(int b=b0; b<bmax; b++)
+    str1[a0+b-b0]=str2[b];
+}
+
+/* ### SEND SMS ### */
+boolean sendSms(char numero[], char msg[]){
+
+  //TODO CHECK IF NUMBER IS GOOD 12 LENGTH
+  char returnCMD[MAXBAUDRATEMSG];
+  sendCMD(returnCMD,"AT+CMGF=1",2000,MAXBAUDRATEMSG);
+
+  delay(100);
+  if(findStr(returnCMD,"OK")){
+
+    char commandPhone[22];
+    appendStr(commandPhone,"AT+CMGS=\"+33",0,0,12);
+    appendStr(commandPhone,numero,12,3,13);
+    commandPhone[21]='"';
+
+    Serial.println(commandPhone);
+
+    resetString(returnCMD);
+
+    sendCMD(returnCMD,commandPhone,2000,MAXBAUDRATEMSG);
+    delay(100);
+
+    resetString(returnCMD);
+
+    //NB/TODO POSSIBILITE DE RAJOUTER SYSTEM DE GESTIONS D ERREUR PLUS POUSSE EN REGARDANT SI LES DEUX PROCHAINES COMMANDE RETOURNE BIEN ">"
+    sendCMD(returnCMD,msg,2000,MAXBAUDRATEMSG);
+    delay(100);
+
+    resetString(returnCMD);
+
+    sendCMD(returnCMD,"ctrlz",2000,MAXBAUDRATEMSG);
+    delay(100);
+
+    if(findStr(returnCMD,OKRETURN))
+      manage(0,226,"SMS ENVOYE","");
+    else
+      manage(1,229,returnCMD,"");
+  }
+  else
+    manage(1,299,returnCMD,"");
+}
+
+/* ### SETUP ### */
+void setup(){
+
+  //INIT SERIAL
+  Serial.begin(SERIALPCBAUDRATE);
+  gsm.begin(SERIALGSMBAUDRATE);
+
+  if(DEBUG)
+    Serial.println("START SETUP");
+
+  //INIT GSM POWERPIN
+  pinMode(POWERKEY, OUTPUT);
+
+  //INIT HEATER PIN
+  pinMode(PINRELAI1,OUTPUT);
+  pinMode(PINRELAI2,OUTPUT);
+
+  digitalWrite(PINRELAI1,LOW);
+  digitalWrite(PINRELAI2,LOW);
+
+  arduinoState=0;
+
+  delay(300);
+
+  while(!checkIfSerialRespond())
+    manage(1,279,"GSM NOT RESPONDING","");
+
+  //manage(2,354,"GSM STARTED","+***********");
+}
+
+/* ### VOID LOOP ###*/
+void loop(){
+
+  Serial.print(".");
+
+  if(checkIfSerialRespond()){
+    Serial.println("start reading SMS");
+    readSms();
+  }
+  else
+    manage(1,279,"GSM NOT RESPONDING","");
+
+  delay(5000);
+}
