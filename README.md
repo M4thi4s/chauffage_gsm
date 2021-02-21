@@ -1,2 +1,2 @@
-# chauffage_gsm
-Pilotage via GSM fil pilote chauffage
+# heater_gsm
+remote control of a pilot wire via a GSM card
