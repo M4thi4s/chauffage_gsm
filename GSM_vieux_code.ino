@@ -55,7 +55,6 @@ void sendCMD(char commandeReturnString[], char cmd[], const int timeForReading, 
 
   while( (timeBefore+timeForReading) > millis()){
     while (gsm.available() && counterCommande<maxSizeString){
-      //TODO : ATTENTION QUE COMPTEUR DEPASSE PAS TAILLE DU TABLEAU
       counterCommande++;
       char c = gsm.read();
       if(commandeReturnString!=0)
@@ -106,7 +105,7 @@ boolean shutdown(){
 
   boolean isShutdown=findStr(returnCMD,OKRETURN);
 
-  delay(10000);  //ERREUR PARFOIS DURANT LECTURE RETOUR DU SHUTDOWN DONC TJR FAIRE UN TEMPS D ATTENTE
+  delay(10000);
 
   if(isShutdown)
     manage(0, 72, "shutdown => OK","");
@@ -120,7 +119,7 @@ void restart(){
   do{
     shutdown();
     digitalWrite(POWERKEY, LOW);
-    delay(1000);               // wait for 1 second
+    delay(1000);               
     digitalWrite(POWERKEY, HIGH);
     delay(15000);
   } while(!checkIfSerialRespond());
@@ -287,7 +286,6 @@ boolean checkPhoneNumber(char undefinedNb[12]){
 }
 
 void subChar(char returnSTR[], char str[], int start, int charLength){
-  //TODO VEFIFIER QUE START + LEN < TAILLE STR
   int c=0;
   for(int a=start; a<start+charLength; a++){
     returnSTR[c]=str[a];  // C more lisible than a-start
@@ -357,7 +355,7 @@ void readSms(){
     }
   }
   //else{
-    //AUCUN SMS TROUVE
+    //NO SMS
   //}
 }
 
@@ -409,7 +407,6 @@ boolean sendSms(char numero[], char msg[]){
 
     resetString(returnCMD);
 
-    //NB/TODO POSSIBILITE DE RAJOUTER SYSTEM DE GESTIONS D ERREUR PLUS POUSSE EN REGARDANT SI LES DEUX PROCHAINES COMMANDE RETOURNE BIEN ">"
     sendCMD(returnCMD,msg,2000,MAXBAUDRATEMSG);
     delay(100);
 
